@@ -110,7 +110,7 @@ pub async fn does_token_exists(pool: Pool<Postgres>, token: &str) -> bool {
         .expect("Checking if token exists error.")
 }
 
-pub async fn player_from_token(pool: Pool<Postgres>, token: &str) -> Player {
+pub async fn player_from_token(pool: Pool<Postgres>, token: &str) -> (i32, String) {
     let username: String = sqlx::query_scalar("SELECT username FROM users WHERE token = $1")
         .bind(&token)
         .fetch_one(&pool)
@@ -123,11 +123,7 @@ pub async fn player_from_token(pool: Pool<Postgres>, token: &str) -> Player {
         .await
         .expect("Error in id select in login_from_token function");
 
-    Player {
-        name: username,
-        id: id,
-        token: String::from(token),
-    }
+    (id, username)
 }
 
 pub async fn add_win_id(pool: Pool<Postgres>, id: i32) {

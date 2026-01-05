@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "Serwer"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bcrypt",
+ "dotenvy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1210,21 +1225,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bcrypt",
- "dotenvy",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

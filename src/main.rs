@@ -17,7 +17,7 @@ use crate::database::{check_password, connect_to_database, create_new_user, does
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot};
-use crate::game::{websocket_connect, Player};
+use crate::game::{Player, websocket_connect};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Login {
@@ -26,9 +26,9 @@ pub struct Login {
     token: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppMod {
-    pub queue: Arc<Mutex<VecDeque<oneshot::Sender<(WebSocket, Player)>>>>,
+    pub queue: Arc<Mutex<VecDeque<oneshot::Sender<Player>>>>,
     pub pool: Pool<Postgres>,
 }
 

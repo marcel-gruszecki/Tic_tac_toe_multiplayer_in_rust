@@ -4,7 +4,6 @@ use axum::extract::State;
 use axum::extract::ws::{Message, Utf8Bytes};
 use axum::extract::ws::WebSocket;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::http::header::ACCEPT;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -12,7 +11,6 @@ use sqlx::{Pool, Postgres};
 use tokio::sync::oneshot;
 use crate::AppMod;
 use crate::database::{add_lose_id, add_win_id, does_token_exists, player_from_token};
-use crate::game::BoardOptions::Null;
 
 const WINNING_COMBINATIONS: [[usize; 3]; 8] = [
     [0, 1, 2], [3, 4, 5], [6, 7, 8],
@@ -20,11 +18,25 @@ const WINNING_COMBINATIONS: [[usize; 3]; 8] = [
     [0, 4, 8], [2, 4, 6]
 ];
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Player {
-    pub id: i32,
-    pub name: String,
-    pub token: String,
+    id: i32,
+    name: String,
+    token: String,
+    response: SerwerResponse,
+    socket: WebSocket,
+}
+
+impl Player {
+    async fn new(socket: WebSocket, token: String, pool: Pool<Postgres>) -> Self {
+        let (id, name) = player_from_token(pool.clone(), &token).await;
+        Self {
+            id,
+            name,
+            token,
+            socket,
+            response: SerwerResponse::new(),
+        }
+    }
 }
 #[derive(Deserialize, Serialize, Clone, Debug, Copy, PartialEq)]
 enum BoardOptions {
@@ -79,7 +91,15 @@ struct SerwerResponse {
 }
 
 impl SerwerResponse {
-    pub fn first_response_player1() -> Self {
+    fn new() -> Self {
+        Self {
+            game: Game::default(),
+            response: MoveResponse::Waiting,
+            status: Status::InGame,
+            your_symbol: BoardOptions::Null,
+        }
+    }
+    fn first_response_player1() -> Self {
         Self {
             game: Game::default(),
             response: MoveResponse::Waiting,
@@ -88,7 +108,7 @@ impl SerwerResponse {
         }
     }
 
-    pub fn first_response_player2() -> Self {
+    fn first_response_player2() -> Self {
         Self {
             game: Game::default(),
             response: MoveResponse::Waiting,
@@ -102,6 +122,7 @@ impl SerwerResponse {
 struct TokenRequest {
     token: String,
 }
+
 pub async fn websocket_connect(ws: WebSocketUpgrade, State(appmod): State<AppMod>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| search_game(socket, appmod))
 }
@@ -110,7 +131,7 @@ async fn search_game(mut socket: WebSocket, appmod: AppMod) {
     let msg = match socket.recv().await {
         Some(Ok(Message::Text(t))) => t,
         _ => {
-            eprintln!("Problem z połączeniem lub brak wiadomości");
+            eprintln!("Websocket connection problem in search_game function");
             return;
         }
     };
@@ -118,172 +139,143 @@ async fn search_game(mut socket: WebSocket, appmod: AppMod) {
     let token_data: TokenRequest = match serde_json::from_str(&msg) {
         Ok(data) => data,
         Err(_) => {
-            eprintln!("Otrzymano błędny format JSON zamiast tokena");
+            eprintln!("Wrong JSON format");
             return;
         }
     };
 
-    if !does_token_exists(appmod.pool.clone(), &token_data.token).await {
-        eprintln!("WebSocket function: token {} doesn't exist", token_data.token);
+    let token = token_data.token;
+    let pool = appmod.pool.clone();
+    if !does_token_exists(pool.clone(), &token).await {
+        eprintln!("Token doesn't exist");
         return;
     }
 
-    let player = player_from_token(appmod.pool.clone(), &token_data.token).await;
+    let mut player = Player::new(socket, token, pool.clone()).await;
 
     let mut rx_to_wait = None;
 
     {
-        let mut q = appmod.queue.lock().unwrap();
+        let mut queue = appmod.queue.lock().unwrap();
 
-        if let Some(tx) = q.pop_front() {
-            let _ = tx.send((socket, player));
+        if let Some(tx) = queue.pop_front() {
+            let _ = tx.send(player);
             return;
         } else {
-            let (tx, rx) = oneshot::channel::<(WebSocket, Player)>();
-            q.push_back(tx);
+            let (tx, rx) = oneshot::channel::<Player>();
+            queue.push_back(tx);
             rx_to_wait = Some(rx);
         }
     }
 
     if let Some(rx) = rx_to_wait {
-        if let Ok(opponent_socket) = rx.await {
-            game(socket, opponent_socket.0, player, opponent_socket.1, appmod.pool.clone()).await;
+        if let Ok(mut opponent) = rx.await {
+            player.response = SerwerResponse::first_response_player1();
+            opponent.response = SerwerResponse::first_response_player2();
+
+            game(player, opponent, pool.clone()).await;
         }
     }
 }
 
-async fn game(mut player1: WebSocket, mut player2: WebSocket, player1_info: Player, player2_info: Player, pool: Pool<Postgres>) {
-    //player1 = O, player2 = X
-    let mut player1_response = SerwerResponse::first_response_player1();
-    let mut player2_response = SerwerResponse::first_response_player2();
+async fn game(mut player1: Player, mut player2: Player, pool: Pool<Postgres>) {
+    let player1 = &mut player1;
+    let player2 = &mut player2;
 
-    match serde_json::to_string(&player1_response) {
-        Ok(json_res) => {let _ = player1.send(Message::Text(json_res.into())).await;}
-        Err(err) => {
-            eprintln!("Coudn't send first message to player1");
-            player2_response.status = Status::Error;
-        }
-    }
+    match full_send(player1, player2, pool.clone()).await {
+        Ok(_) => {}
+        Err(err) => { eprintln!("{} disconnected", player1.name); return }
+    };
 
-    match serde_json::to_string(&player2_response) {
-        Ok(json_res) => {let _ = player2.send(Message::Text(json_res.into())).await;}
-        Err(err) => {
-            eprintln!("Coudn't send first message to player2");
-            player1_response.status = Status::Error;
-        }
-    }
-
-    if player1_response.status == Status::Error || player2_response.status == Status::Error { return }
+    match full_send(player2, player1, pool.clone()).await {
+        Ok(_) => {}
+        Err(err) => { eprintln!("{} disconnected", player2.name); return }
+    };
 
     loop {
         tokio::select! {
-            res1 = player1.recv() => {
-                match res1 {
-                    Some(Ok(msg1)) => {
-                        if let Ok(text) = msg1.to_text() {
-                            match serde_json::from_str::<Move>(text) {
-                                Ok(player_move) => {
-                                    make_a_move(player_move, &mut player1_response, &mut player2_response);
-
-                                    match send_json(&mut player1, &player1_response).await {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            eprintln!("Player1 sending error in send_json function");
-                                            player2_response.status = Status::Error;
-                                        }
-                                    }
-
-                                    match send_json(&mut player2, &player2_response).await {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            eprintln!("Player1 sending error in send_json function");
-                                            player1_response.status = Status::Error;
-                                        }
-                                    }
-
-                                    if player1_response.status != Status::InGame { break; }
-                                }
-                                Err(e) => {
-                                    eprintln!("Wrong JSON format")
-                                }
-                            }
-                        }
+            result1 = player1.socket.recv() => {
+                match player_handler(player1, player2, &result1, pool.clone()).await {
+                    Ok(_) => {
+                        if player1.response.status != Status::InGame { break }
+                        if player2.response.status != Status::InGame { break }
                     }
-
-                    _ => {
-                        player2_response.status = Status::Error;
-                        add_win_id(pool.clone(), player1_info.id).await;
-                        add_lose_id(pool.clone(), player2_info.id).await;
-                        let _ = send_json(&mut player2, &player2_response).await;
+                    Err(err) => {
                         break;
                     }
                 }
             }
 
-            res2 = player2.recv() => {
-                match res2 {
-                    Some(Ok(msg2)) => {
-                        if let Ok(text) = msg2.to_text() {
-                            match serde_json::from_str::<Move>(text) {
-                                Ok(player_move) => {
-                                    make_a_move(player_move, &mut player2_response, &mut player1_response);
-
-                                    match send_json(&mut player2, &player2_response).await {
-                                        Ok(_) => {}
-                                        Err(_err) => {
-                                            eprintln!("Player2 sending error in send_json function");
-                                            player1_response.status = Status::Error;
-                                        }
-                                    }
-
-                                    match send_json(&mut player1, &player1_response).await {
-                                        Ok(_) => {}
-                                        Err(_err) => {
-                                            eprintln!("Player1 sending error in send_json function while P2 moved");
-                                            player2_response.status = Status::Error;
-                                        }
-                                    }
-
-                                    if player2_response.status != Status::InGame { break; }
-                                }
-                                Err(e) => {
-                                    eprintln!("Wrong JSON format from Player 2: {:?}", e);
-                                }
-                            }
-                        }
+            result2 = player2.socket.recv() => {
+                match player_handler(player2, player1, &result2, pool.clone()).await {
+                    Ok(_) => {
+                        if player1.response.status != Status::InGame { break }
+                        if player2.response.status != Status::InGame { break }
                     }
-                    _ => {
-                        eprintln!("Player 2 disconnected");
-                        player1_response.status = Status::Error;
-                        add_win_id(pool.clone(), player2_info.id).await;
-                        add_lose_id(pool.clone(), player1_info.id).await;
-                        let _ = send_json(&mut player1, &player1_response).await;
+                    Err(err) => {
                         break;
                     }
                 }
             }
         }
     }
-
-    if player1_response.status == Status::Player1Won && player1_response.status == player2_response.status {
-        println!("player1 won");
-        add_win_id(pool.clone(), player1_info.id).await;
-        add_lose_id(pool.clone(), player2_info.id).await;
-    }
-
-    if player2_response.status == Status::Player2Won && player1_response.status == player2_response.status {
-        add_win_id(pool.clone(), player2_info.id).await;
-        add_lose_id(pool.clone(), player1_info.id).await;
-    }
 }
 
-async fn send_json<T: serde::Serialize>(socket: &mut WebSocket, from_struct: &T) -> Result<(), axum::Error> {
-    let response_json = serde_json::to_string(&from_struct)
-        .map_err(axum::Error::new)?;
+async fn player_handler(sender: &mut Player, waiting_player: &mut Player, result: &Option<Result<Message, Error>>, pool: Pool<Postgres>) -> Result<(), Error> {
+    match result {
+        Some(Ok(message)) => {
+            match message.to_text() {
+                Ok(text) => {
+                    match serde_json::from_str::<Move>(text) {
+                        Ok(player_move) => {
+                            make_a_move(player_move, &mut sender.response, &mut waiting_player.response);
 
-    socket.send(Message::Text(response_json.into())).await?;
+                            match full_send(sender, waiting_player, pool.clone()).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    eprintln!("{} disconnected", sender.name);
+                                    return Err(err)
+                                }
+                            };
 
-    Ok(())
+                            match full_send(waiting_player, sender, pool.clone()).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    eprintln!("{} disconnected", waiting_player.name);
+                                    return Err(err)
+                                }
+                            };
+
+                            Ok(())
+                        }
+                        Err(err) => {
+                            sender.response.response = MoveResponse::Refused;
+                            match full_send(sender, waiting_player, pool.clone()).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    eprintln!("{} sent an wrong JSON format", waiting_player.name);
+                                    return Err(err)
+                                }
+                            };
+                            Ok(())
+                        }
+                    }
+                }
+                Err(err) => {
+                    Err(err)
+                }
+            }
+        }
+
+        _ => {
+            eprintln!("{} lost connection", waiting_player.name);
+            waiting_player.response.status = Status::Error;
+            add_win_id(pool.clone(), waiting_player.id).await;
+            add_lose_id(pool.clone(), sender.id).await;
+            let _ = send_json(&mut waiting_player.socket, &waiting_player.response).await;
+            Err(Error::new("Player disconnected or invalid state"))
+        }
+    }
 }
 
 fn make_a_move(from_user: Move, current_player: &mut SerwerResponse, waiting_player: &mut SerwerResponse) {
@@ -360,3 +352,23 @@ fn check_winner(board: &[BoardOptions; 9]) -> Status {
     }
 }
 
+async fn full_send(receiver: &mut Player, waiting_player: &mut Player, pool: Pool<Postgres>) -> Result<(), Error> {
+    match send_json(&mut receiver.socket, &receiver.response).await {
+        Ok(_) => {Ok(())}
+        Err(err) => {
+            eprintln!("{} coudn't recieve message.", receiver.name);
+            waiting_player.response.status = Status::Error;
+            add_win_id(pool.clone(), waiting_player.id).await;
+            add_lose_id(pool.clone(), receiver.id).await;
+            Err(err)
+        }
+    }
+}
+async fn send_json<T: serde::Serialize>(socket: &mut WebSocket, from_struct: &T) -> Result<(), axum::Error> {
+    let response_json = serde_json::to_string(&from_struct)
+        .map_err(axum::Error::new)?;
+
+    socket.send(Message::Text(response_json.into())).await?;
+
+    Ok(())
+}
