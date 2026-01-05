@@ -1,9 +1,10 @@
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::env::VarError;
-use sqlx::{Executor, Pool, Postgres};
+use sqlx::{Executor, FromRow, Pool, Postgres};
 use crate::Login;
 use bcrypt::{DEFAULT_COST, hash, verify};
+use serde::Serialize;
 use crate::game::Player;
 
 pub async fn connect_to_database() -> Pool<Postgres> {
@@ -37,18 +38,18 @@ async fn database_init(pool: Pool<Postgres>) {
             "
     )).await.expect("Database failed in database_init.");
 
-    pool.execute(sqlx::query(
-            "
-        CREATE TABLE IF NOT EXISTS games (
-            id SERIAL PRIMARY KEY,
-            player_x INTEGER NOT NULL,
-            player_y INTEGER NOT NULL,
-            board TEXT[],
-            current_turn INTEGER NOT NULL,
-            status TEXT NOT NULL
-        )
-                "
-    )).await.expect("Database failed in database_init.");
+    // pool.execute(sqlx::query(
+    //         "
+    //     CREATE TABLE IF NOT EXISTS games (
+    //         id SERIAL PRIMARY KEY,
+    //         player_x INTEGER NOT NULL,
+    //         player_y INTEGER NOT NULL,
+    //         board TEXT[],
+    //         current_turn INTEGER NOT NULL,
+    //         status TEXT NOT NULL
+    //     )
+    //             "
+    // )).await.expect("Database failed in database_init.");
 }
 
 pub async fn create_new_user(pool: Pool<Postgres>, log: &Login) -> bool {
@@ -140,5 +141,35 @@ pub async fn add_lose_id(pool: Pool<Postgres>, id: i32) {
         .execute(&pool)
         .await
         .expect("Add loose to database error.");
+}
+
+#[derive(Serialize, FromRow)] // Serialize pozwala na JSON, FromRow dla sqlx
+pub struct UserRank {
+    pub username: String,
+    pub points: i32,
+}
+
+impl UserRank {
+    pub fn new() -> Self {
+        Self {
+            username: String::new(),
+            points: 0,
+        }
+    }
+}
+
+pub async fn top10_from_database(pool: Pool<Postgres>) -> Result<Vec<UserRank>, sqlx::Error> {
+    let top_users = sqlx::query_as::<_, UserRank>(
+        "
+        SELECT username, points
+        FROM users
+        ORDER BY points DESC
+        LIMIT 10
+        "
+    )
+        .fetch_all(&pool)
+        .await?;
+
+    Ok(top_users)
 }
 

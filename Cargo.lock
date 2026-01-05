@@ -12,6 +12,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "sqlx-postgres",
  "tokio",
  "tracing-subscriber",
  "uuid",

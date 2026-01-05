@@ -13,3 +13,4 @@ bcrypt = "0.17.1"
 dotenvy = "0.15.7"
 uuid = { version = "1.19.0", features = [ "v4" ] }
 serde_json = "1.0.148"
+sqlx-postgres = "0.8.6"

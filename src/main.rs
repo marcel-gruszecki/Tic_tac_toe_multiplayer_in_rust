@@ -12,10 +12,11 @@ use axum::extract::ws::WebSocket;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Postgres};
-use crate::database::{check_password, connect_to_database, create_new_user, does_user_exist};
+use sqlx::{Error, Pool, Postgres};
+use crate::database::{check_password, connect_to_database, create_new_user, does_user_exist, top10_from_database, UserRank};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use sqlx_postgres::PgRow;
 use tokio::sync::{broadcast, oneshot};
 use crate::game::{Player, websocket_connect};
 
@@ -44,10 +45,19 @@ async fn main() {
         .route("/api/register", post(check_register))
         .route("/api/login", post(check_login))
         .route("/api/search", get(websocket_connect))
+        .route("/api/top10", post(top10))
         .with_state(appmod);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn top10(State(appmod): State<AppMod>) -> impl IntoResponse {
+    if let Ok(result) = top10_from_database(appmod.pool.clone()).await {
+        (StatusCode::OK, Json(result))
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(vec![UserRank::new()]))
+    }
 }
 
 async fn check_login(State(appmod): State<AppMod>, Json(payload): Json<Login>) -> impl IntoResponse {
