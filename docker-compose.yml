@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tictactoe
+      POSTGRES_USER: gracz
+      POSTGRES_PASSWORD: haslo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gracz -d tictactoe"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      args:
+        DATABASE_URL: postgresql://gracz:haslo@db:5432/tictactoe
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://gracz:haslo@db:5432/tictactoe
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

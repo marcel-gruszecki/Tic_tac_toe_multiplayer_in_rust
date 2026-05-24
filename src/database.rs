@@ -1,11 +1,9 @@
 use sqlx::postgres::PgPoolOptions;
 use std::env;
-use std::env::VarError;
 use sqlx::{Executor, FromRow, Pool, Postgres};
 use crate::Login;
 use bcrypt::{DEFAULT_COST, hash, verify};
 use serde::Serialize;
-use crate::game::Player;
 
 pub async fn connect_to_database() -> Pool<Postgres> {
     dotenvy::dotenv().expect("Env error.");
@@ -32,7 +30,7 @@ async fn database_init(pool: Pool<Postgres>) {
             password TEXT NOT NULL,
             wins INTEGER DEFAULT 0,
             loses INTEGER DEFAULT 0,
-            points INTEGER GENERATED ALWAYS AS (GREATEST(wins - loses)) STORED,
+            points INTEGER GENERATED ALWAYS AS (GREATEST(wins - loses, 0)) STORED,
             token TEXT
     )
             "

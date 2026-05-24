@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tic-Tac-Toe Pro</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #2c3e50; color: white; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .card { background: #34495e; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); text-align: center; }
+        .hidden { display: none !important; }
+        
+        /* Layout Menu */
+        .menu-container { display: flex; gap: 30px; align-items: flex-start; text-align: left; }
+        .menu-main { width: 250px; text-align: center; }
+        
+        /* Ranking */
+        .ranking-table { background: rgba(0,0,0,0.2); border-radius: 8px; padding: 15px; min-width: 220px; border: 1px solid #4a6278; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 8px; border-bottom: 1px solid #4a6278; text-align: left; }
+        th { color: #3498db; text-transform: uppercase; font-size: 0.75rem; }
+        
+        .updating { animation: pulse 0.5s; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+        /* Przyciski */
+        input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; border: none; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #3498db; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+        button:hover { background: #2980b9; }
+        .btn-exit { background: #c0392b; margin-top: 20px; }
+
+        /* Plansza */
+        .grid { display: grid; grid-template-columns: repeat(3, 90px); grid-gap: 8px; margin-top: 20px; justify-content: center; }
+        .cell { width: 90px; height: 90px; background: #ecf0f1; color: #2c3e50; font-size: 2.5rem; display: flex; align-items: center; justify-content: center; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .cell.taken { cursor: not-allowed; opacity: 0.8; }
+        
+        .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 10px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        #game-header { margin-bottom: 5px; font-size: 1.1rem; color: #3498db; font-weight: bold; }
+        #status-info { font-size: 1.4rem; font-weight: bold; margin: 10px 0; min-height: 1.6em; }
+    </style>
+</head>
+<body>
+
+    <div id="screen-auth" class="card">
+        <h2>Zaloguj się</h2>
+        <input type="text" id="in-user" placeholder="Użytkownik">
+        <input type="password" id="in-pass" placeholder="Hasło">
+        <button onclick="auth('login')">Zaloguj</button>
+        <button onclick="auth('register')" style="background: #7f8c8d;">Zarejestruj</button>
+        <p id="auth-err" style="color: #e74c3c;"></p>
+    </div>
+
+    <div id="screen-menu" class="card hidden">
+        <div class="menu-container">
+            <div class="menu-main">
+                <h2>Witaj, <span id="player-name"></span>!</h2>
+                <div id="search-controls">
+                    <button onclick="startSearch()">SZUKAJ GRY</button>
+                </div>
+                <div id="loader-box" class="hidden">
+                    <div class="loader"></div>
+                    <p>Szukam przeciwnika...</p>
+                </div>
+                <button onclick="logout()" style="background: transparent; color: #7f8c8d; font-size: 0.8rem;">Wyloguj</button>
+            </div>
+            <div class="ranking-table" id="ranking-container">
+                <h3 style="margin-top:0">🏆 Top 10 <span style="font-size:0.6rem; color:#2ecc71">● LIVE</span></h3>
+                <table>
+                    <thead><tr><th>Gracz</th><th>Wygrane</th></tr></thead>
+                    <tbody id="ranking-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="screen-game" class="card hidden">
+        <div id="game-header"></div>
+        <div id="status-info">Inicjalizacja...</div>
+        <p>Twój symbol: <b id="player-symbol" style="color:#e67e22">-</b></p>
+        
+        <div class="grid" id="board">
+            <div class="cell" onclick="makeMove(0)"></div>
+            <div class="cell" onclick="makeMove(1)"></div>
+            <div class="cell" onclick="makeMove(2)"></div>
+            <div class="cell" onclick="makeMove(3)"></div>
+            <div class="cell" onclick="makeMove(4)"></div>
+            <div class="cell" onclick="makeMove(5)"></div>
+            <div class="cell" onclick="makeMove(6)"></div>
+            <div class="cell" onclick="makeMove(7)"></div>
+            <div class="cell" onclick="makeMove(8)"></div>
+        </div>
+        <button id="btn-back" class="btn-exit hidden" onclick="backToMenu()">Wróć do menu</button>
+    </div>
+
+    <script>
+        let userToken = "";
+        let myUsername = "";
+        let ws = null;
+        let mySide = "";
+        let opponentName = "";
+        let rankingInterval = null;
+
+        async function auth(mode) {
+            const name = document.getElementById('in-user').value;
+            const pass = document.getElementById('in-pass').value;
+            try {
+                const res = await fetch('/api/' + mode, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, password: pass, token: "" })
+                });
+                if (res.ok) {
+                    if (mode === 'login') {
+                        userToken = await res.json();
+                        myUsername = name;
+                        showMenu();
+                    } else { alert("Konto utworzone!"); }
+                } else { document.getElementById('auth-err').innerText = "Błąd autoryzacji"; }
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadTop10() {
+            try {
+                const res = await fetch('/api/top10');
+                const data = await res.json();
+                const body = document.getElementById('ranking-body');
+                body.innerHTML = data.map(u => `<tr><td>${u.username}</td><td>${u.wins}</td></tr>`).join('');
+                document.getElementById('ranking-container').classList.add('updating');
+                setTimeout(() => document.getElementById('ranking-container').classList.remove('updating'), 500);
+            } catch (e) { console.error(e); }
+        }
+
+        function showMenu() {
+            document.getElementById('screen-auth').classList.add('hidden');
+            document.getElementById('screen-game').classList.add('hidden');
+            document.getElementById('screen-menu').classList.remove('hidden');
+            document.getElementById('player-name').innerText = myUsername;
+            loadTop10();
+            if (!rankingInterval) rankingInterval = setInterval(loadTop10, 5000);
+        }
+
+        function startSearch() {
+            document.getElementById('search-controls').classList.add('hidden');
+            document.getElementById('loader-box').classList.remove('hidden');
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/api/search`);
+            ws.onopen = () => ws.send(JSON.stringify({ token: userToken }));
+            ws.onmessage = (evt) => {
+                if (rankingInterval) { clearInterval(rankingInterval); rankingInterval = null; }
+                renderGame(JSON.parse(evt.data));
+            };
+        }
+
+        function renderGame(data) {
+            const screenGame = document.getElementById('screen-game');
+            const statusEl = document.getElementById('status-info');
+            const headerEl = document.getElementById('game-header');
+
+            if (screenGame.classList.contains('hidden')) {
+                document.getElementById('screen-menu').classList.add('hidden');
+                screenGame.classList.remove('hidden');
+                mySide = data.your_symbol;
+                opponentName = data.opponent_name || "Nieznajomy";
+                document.getElementById('player-symbol').innerText = mySide;
+                headerEl.innerText = "Przeciwnik: " + opponentName;
+            }
+
+            // Aktualizacja planszy
+            const cells = document.querySelectorAll('.cell');
+            data.game.board.forEach((val, i) => {
+                cells[i].innerText = (val === 'Null') ? '' : val;
+                cells[i].className = (val === 'Null') ? 'cell' : 'cell taken';
+            });
+
+            if (data.status === 'InGame') {
+                document.getElementById('btn-back').classList.add('hidden');
+                if (data.game.current_move === mySide) {
+                    statusEl.innerText = "TWOJA TURA";
+                    statusEl.style.color = "#2ecc71";
+                } else {
+                    statusEl.innerText = "Tura: " + opponentName;
+                    statusEl.style.color = "white";
+                }
+            } else {
+                // Koniec gry
+                if (data.status === 'Draw') {
+                    statusEl.innerText = "REMIS!";
+                    statusEl.style.color = "#f1c40f";
+                } else if (
+                    (data.status === 'Player1Won' && mySide === 'O') || 
+                    (data.status === 'Player2Won' && mySide === 'X')
+                ) {
+                    statusEl.innerText = "WYGRAŁEŚ! 🎉";
+                    statusEl.style.color = "#2ecc71";
+                } else {
+                    statusEl.innerText = "WYGRAŁ " + opponentName;
+                    statusEl.style.color = "#e74c3c";
+                }
+                document.getElementById('btn-back').classList.remove('hidden');
+            }
+        }
+
+        function makeMove(idx) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ field: idx }));
+            }
+        }
+
+        function backToMenu() {
+            if (ws) ws.close();
+            showMenu();
+        }
+
+        function logout() {
+            if (rankingInterval) clearInterval(rankingInterval);
+            location.reload();
+        }
+    </script>
+</body>
+</html>
