@@ -1,3 +1,32 @@
+//! # Database Layer
+//!
+//! PostgreSQL persistence for users, sessions and match results, built on
+//! [SQLx](https://github.com/launchbadge/sqlx) with an async connection pool.
+//!
+//! ## Schema
+//!
+//! ```sql
+//! CREATE TABLE users (
+//!     id       SERIAL PRIMARY KEY,
+//!     username TEXT    NOT NULL UNIQUE,
+//!     password TEXT    NOT NULL,           -- bcrypt hash
+//!     wins     INTEGER DEFAULT 0,
+//!     loses    INTEGER DEFAULT 0,
+//!     points   INTEGER GENERATED ALWAYS AS (GREATEST(wins - loses, 0)) STORED,
+//!     token    TEXT                        -- UUID session token, refreshed on every login
+//! );
+//! ```
+//!
+//! Passwords are hashed with bcrypt ([`bcrypt`] crate) before storage and are
+//! never stored or logged in plain text. Session tokens are random UUIDs generated
+//! with [`uuid::Uuid::new_v4`] and rotated on every successful login.
+//!
+//! ## Author
+//! Marcel Gruszecki
+//!
+//! ## License
+//! MIT — see `LICENSE` in the repository root.
+
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use sqlx::{Executor, FromRow, Pool, Postgres};
@@ -6,9 +35,8 @@ use bcrypt::{DEFAULT_COST, hash, verify};
 use serde::Serialize;
 
 pub async fn connect_to_database() -> Pool<Postgres> {
-    dotenvy::dotenv().expect("Env error.");
     let db_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set (check your .env file)");
+        .expect("DATABASE_URL must be set");
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -36,18 +64,6 @@ async fn database_init(pool: Pool<Postgres>) {
             "
     )).await.expect("Database failed in database_init.");
 
-    // pool.execute(sqlx::query(
-    //         "
-    //     CREATE TABLE IF NOT EXISTS games (
-    //         id SERIAL PRIMARY KEY,
-    //         player_x INTEGER NOT NULL,
-    //         player_y INTEGER NOT NULL,
-    //         board TEXT[],
-    //         current_turn INTEGER NOT NULL,
-    //         status TEXT NOT NULL
-    //     )
-    //             "
-    // )).await.expect("Database failed in database_init.");
 }
 
 pub async fn create_new_user(pool: Pool<Postgres>, log: &Login) -> bool {
@@ -141,9 +157,10 @@ pub async fn add_lose_id(pool: Pool<Postgres>, id: i32) {
         .expect("Add loose to database error.");
 }
 
-#[derive(Serialize, FromRow)] // Serialize pozwala na JSON, FromRow dla sqlx
+#[derive(Serialize, FromRow)]
 pub struct UserRank {
     pub username: String,
+    pub wins: i32,
     pub points: i32,
 }
 
@@ -151,6 +168,7 @@ impl UserRank {
     pub fn new() -> Self {
         Self {
             username: String::new(),
+            wins: 0,
             points: 0,
         }
     }
@@ -158,15 +176,13 @@ impl UserRank {
 
 pub async fn top10_from_database(pool: Pool<Postgres>) -> Result<Vec<UserRank>, sqlx::Error> {
     let top_users = sqlx::query_as::<_, UserRank>(
-        "
-        SELECT username, points
-        FROM users
-        ORDER BY points DESC
-        LIMIT 10
-        "
+        "SELECT username, wins, points
+         FROM users
+         ORDER BY points DESC
+         LIMIT 10"
     )
-        .fetch_all(&pool)
-        .await?;
+    .fetch_all(&pool)
+    .await?;
 
     Ok(top_users)
 }

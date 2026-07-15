@@ -1,67 +1,86 @@
-# Tic-Tac-Toe Multiplayer – Rust Server
+# Tic-Tac-Toe Multiplayer
 
-A real-time multiplayer Tic-Tac-Toe server written in **Rust** using the **Axum** framework, **WebSocket** communication, and **PostgreSQL** for persistence. The frontend is a plain HTML/CSS/JS single file (`index.html`) with no external dependencies.
+A real-time multiplayer Tic-Tac-Toe server written in **Rust** using the **Axum** framework, **WebSocket** communication, and **PostgreSQL** for persistence. The frontend is a single self-contained `index.html` file with no external dependencies.
+
+**Author:** Marcel Gruszecki  
+**License:** MIT
+
+---
+
+> [!WARNING]
+> `docker-compose.yml` contains default database credentials (`gracz` / `haslo`).
+> **Change them before deploying to any non-local environment.**
+> Update both the `db` service environment variables and the `DATABASE_URL` in the `server` service.
 
 ---
 
 ## Features
 
 - User registration and login with bcrypt password hashing
-- Matchmaking queue — players are automatically paired when two are waiting
+- Matchmaking queue — players are automatically paired when two are searching
 - Real-time gameplay over WebSocket
 - Server-side move validation
-- Automatic win on opponent disconnect
-- Top 10 leaderboard (score = wins − losses)
-- Database schema is created automatically on startup
+- Automatic win awarded on opponent disconnect
+- Live Top 10 leaderboard (score = wins − losses, minimum 0)
+- Database schema is created automatically on first startup
 
 ---
 
-## Requirements
+## Tech Stack
 
-| Tool | Minimum version |
-|------|----------------|
-| Rust | 1.80+ |
-| PostgreSQL | 14+ |
-| Docker (optional) | 20+ |
-| Apache (optional) | 2.4+ |
+| Layer | Technology |
+|-------|-----------|
+| Language | [Rust](https://www.rust-lang.org/) |
+| HTTP / WebSocket | [Axum](https://github.com/tokio-rs/axum) 0.8 |
+| Async runtime | [Tokio](https://tokio.rs/) |
+| Database client | [sqlx](https://github.com/launchbadge/sqlx) |
+| Password hashing | [bcrypt](https://docs.rs/bcrypt) |
+| Database | [PostgreSQL](https://www.postgresql.org/) 16 |
+| Frontend | HTML / CSS / JS |
 
 ---
 
-## Quick Start – Local Development
+## Quick Start — Docker Compose
 
-### 1. Clone the repository
+The easiest way to run everything (database + server + web) in one command:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/marcel-gruszecki/Tic_tac_toe_multiplayer_in_rust
 cd Tic_tac_toe_multiplayer_in_rust
+
+docker compose up --build
 ```
 
-### 2. Set up PostgreSQL
+Three containers come up: PostgreSQL, the Rust server, and an Apache container that
+serves `index.html` and proxies `/api/` to the server on the same origin.
 
-```sql
-CREATE DATABASE tictactoe;
-CREATE USER player WITH PASSWORD 'password';
-GRANT ALL PRIVILEGES ON DATABASE tictactoe TO player;
+Open **`http://localhost`** in your browser — that's it.
+The raw API/WebSocket is also reachable directly at `http://localhost:3000` if needed.
+
+### Changing default credentials
+
+Open `docker-compose.yml` and replace all occurrences of the default values:
+
+Before:
+```yaml
+POSTGRES_USER: gracz
+POSTGRES_PASSWORD: haslo
+DATABASE_URL: postgresql://gracz:haslo@db:5432/tictactoe
 ```
 
-### 3. Configure the `.env` file
-
-```env
-DATABASE_URL=postgresql://player:password@localhost:5432/tictactoe
+After (example):
+```yaml
+POSTGRES_USER: myuser
+POSTGRES_PASSWORD: str0ngPassw0rd!
+DATABASE_URL: postgresql://myuser:str0ngPassw0rd!@db:5432/tictactoe
 ```
 
-### 4. Build and run
+---
 
-```bash
-cargo run --release
-```
-
-The database schema is created automatically on first run.  
-The server listens on `http://0.0.0.0:3000`.
-
-### 5. Open the frontend
-
-Open `index.html` directly in a browser, or serve it through Apache (see the Apache section below).
+> [!NOTE]
+> This project is only supported via Docker Compose — the server reads `DATABASE_URL`
+> straight from the environment and does not load a `.env` file. There is no
+> local (non-Docker) run path.
 
 ---
 
@@ -70,62 +89,66 @@ Open `index.html` directly in a browser, or serve it through Apache (see the Apa
 ```
 .
 ├── src/
-│   ├── main.rs        # Server bootstrap, routing, matchmaking queue
-│   ├── game.rs        # Game logic, WebSocket handlers
-│   └── database.rs    # PostgreSQL queries
-├── index.html         # Frontend (HTML/CSS/JS)
-├── Dockerfile
+│   ├── main.rs        # Server bootstrap, routing, shared application state
+│   ├── game.rs        # WebSocket handlers, matchmaking queue, game loop
+│   └── database.rs    # PostgreSQL queries, schema init, password hashing
+├── index.html         # Frontend (HTML / CSS / JS — no build step)
+├── Dockerfile         # Multi-stage: builder -> server target, web (Apache) target
 ├── docker-compose.yml
-├── .env               # Environment variables (do not commit!)
+├── apache.conf        # Apache reverse-proxy config, baked into the `web` image
 └── Cargo.toml
 ```
 
 ---
 
-## API
+## API Reference
 
-### REST Endpoints
+### REST
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/register` | POST | Register a new user |
-| `/api/login` | POST | Log in, returns a UUID session token |
-| `/api/top10` | POST | Fetch the top 10 ranked players |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/register` | Create a new account |
+| POST | `/api/login` | Authenticate; returns a UUID session token |
+| GET | `/api/top10` | Fetch the top-10 leaderboard |
 
-**Request body (register / login):**
+**Request body — register / login:**
 ```json
 {
   "name": "playerName",
-  "password": "password",
+  "password": "secret",
   "token": ""
 }
 ```
 
-**Login response (HTTP 202):**
+**Login — success (HTTP 202):**
 ```json
-{
-  "token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-}
+"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
+
+**Login — failure (HTTP 404):**
+```json
+"ERROR"
 ```
 
 ### WebSocket
 
 | Endpoint | Description |
 |----------|-------------|
-| `/api/search` | Matchmaking and real-time gameplay |
+| `GET /api/search` | Enter matchmaking queue; upgrades to WebSocket |
 
-**Initiate connection (client → server):**
+**1. Authenticate immediately after connecting (client → server):**
 ```json
 { "token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" }
 ```
 
-**Send a move (client → server):**
+**2. Send a move (client → server):**
 ```json
 { "field": 4 }
 ```
-`field` is the board cell index (0–8), where 0 = top-left, 8 = bottom-right.
 
-**Game state (server → client):**
+`field` is the board cell index (0–8): 0 = top-left, 8 = bottom-right.
+
+**Game state pushed after every move (server → client):**
 ```json
 {
   "game": {
@@ -138,20 +161,19 @@ Open `index.html` directly in a browser, or serve it through Apache (see the Apa
 }
 ```
 
-| `response` value | Meaning |
-|-----------------|---------|
-| `Accepted` | Move accepted |
-| `Refused` | Move rejected (wrong turn or occupied cell) |
-| `OtherPlayer` | The opponent just moved |
-| `Waiting` | Waiting for an opponent |
+| `response` | Meaning |
+|-----------|---------|
+| `Accepted` | Move was valid and applied |
+| `Refused` | Wrong turn or cell already taken |
+| `Waiting` | Waiting for the opponent's move |
 
-| `status` value | Meaning |
-|---------------|---------|
+| `status` | Meaning |
+|---------|---------|
 | `InGame` | Game in progress |
-| `Player1Won` | Player 1 won |
-| `Player2Won` | Player 2 won |
-| `Draw` | Draw |
-| `Error` | Error or disconnection |
+| `Player1Won` | Player with symbol `O` won |
+| `Player2Won` | Player with symbol `X` won |
+| `Draw` | Board full, no winner |
+| `Error` | Opponent disconnected |
 
 ---
 
@@ -159,157 +181,23 @@ Open `index.html` directly in a browser, or serve it through Apache (see the Apa
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
-    id       SERIAL PRIMARY KEY,
+    id       SERIAL  PRIMARY KEY,
     username TEXT    NOT NULL UNIQUE,
-    password TEXT    NOT NULL,
+    password TEXT    NOT NULL,           -- bcrypt hash, never stored in plain text
     wins     INTEGER DEFAULT 0,
     loses    INTEGER DEFAULT 0,
-    points   INTEGER GENERATED ALWAYS AS (GREATEST(wins - loses)) STORED,
-    token    TEXT
+    points   INTEGER GENERATED ALWAYS AS (GREATEST(wins - loses, 0)) STORED,
+    token    TEXT                        -- UUID, rotated on every login
 );
 ```
 
-> The table is created automatically on server startup — no manual setup needed.
+The table is created automatically on first startup — no manual migration needed.
 
 ---
 
-## Apache Configuration (Reverse Proxy)
+## Security Notes
 
-The Rust server runs on port `3000`. Apache acts as a reverse proxy, forwarding both HTTP API requests and WebSocket connections, while serving the static `index.html` frontend.
-
-### Required modules
-
-```bash
-sudo a2enmod proxy
-sudo a2enmod proxy_http
-sudo a2enmod proxy_wstunnel
-sudo a2enmod rewrite
-sudo systemctl restart apache2
-```
-
-### VirtualHost – HTTP
-
-Create `/etc/apache2/sites-available/tictactoe.conf`:
-
-```apache
-<VirtualHost *:80>
-    ServerName yourdomain.com
-
-    # Directory containing index.html
-    DocumentRoot /var/www/tictactoe
-
-    <Directory /var/www/tictactoe>
-        Options -Indexes
-        AllowOverride None
-        Require all granted
-    </Directory>
-
-    # Proxy WebSocket connections
-    RewriteEngine On
-    RewriteCond %{HTTP:Upgrade} websocket [NC]
-    RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/api/(.*)$ ws://127.0.0.1:3000/api/$1 [P,L]
-
-    # Proxy REST API requests
-    ProxyPass        /api/ http://127.0.0.1:3000/api/
-    ProxyPassReverse /api/ http://127.0.0.1:3000/api/
-
-    ErrorLog  ${APACHE_LOG_DIR}/tictactoe_error.log
-    CustomLog ${APACHE_LOG_DIR}/tictactoe_access.log combined
-</VirtualHost>
-```
-
-### VirtualHost – HTTPS (Let's Encrypt)
-
-```apache
-<VirtualHost *:443>
-    ServerName yourdomain.com
-
-    DocumentRoot /var/www/tictactoe
-
-    <Directory /var/www/tictactoe>
-        Options -Indexes
-        AllowOverride None
-        Require all granted
-    </Directory>
-
-    SSLEngine on
-    SSLCertificateFile    /etc/letsencrypt/live/yourdomain.com/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/yourdomain.com/privkey.pem
-
-    # Proxy WebSocket connections (wss://)
-    RewriteEngine On
-    RewriteCond %{HTTP:Upgrade} websocket [NC]
-    RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/api/(.*)$ wss://127.0.0.1:3000/api/$1 [P,L]
-
-    ProxyPass        /api/ http://127.0.0.1:3000/api/
-    ProxyPassReverse /api/ http://127.0.0.1:3000/api/
-
-    ErrorLog  ${APACHE_LOG_DIR}/tictactoe_ssl_error.log
-    CustomLog ${APACHE_LOG_DIR}/tictactoe_ssl_access.log combined
-</VirtualHost>
-```
-
-### Enable the site
-
-```bash
-# Copy index.html to the DocumentRoot
-sudo mkdir -p /var/www/tictactoe
-sudo cp index.html /var/www/tictactoe/
-
-# Enable the site
-sudo a2ensite tictactoe.conf
-sudo systemctl reload apache2
-```
-
-> **Note:** When using HTTPS, the frontend must connect via `wss://` instead of `ws://`. Make sure the JavaScript in `index.html` uses the correct protocol or detects it automatically from `window.location.protocol`.
-
----
-
-## Docker
-
-### Build the image
-
-sqlx validates SQL queries at compile time, so `DATABASE_URL` must be available during the build.
-
-```bash
-docker build \
-  --build-arg DATABASE_URL="postgresql://player:password@host.docker.internal:5432/tictactoe" \
-  -t tictactoe-server .
-```
-
-### Run the container
-
-```bash
-docker run -d \
-  --name tictactoe \
-  -p 3000:3000 \
-  -e DATABASE_URL="postgresql://player:password@host.docker.internal:5432/tictactoe" \
-  tictactoe-server
-```
-
-### Docker Compose (server + database)
-
-```bash
-docker compose up -d
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `DATABASE_URL` | Yes | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/tictactoe` |
-
----
-
-## Tech Stack
-
-- **[Rust](https://www.rust-lang.org/)** — systems programming language
-- **[Axum](https://github.com/tokio-rs/axum)** — async HTTP/WebSocket framework
-- **[Tokio](https://tokio.rs/)** — async runtime
-- **[sqlx](https://github.com/launchbadge/sqlx)** — async PostgreSQL client
-- **[bcrypt](https://docs.rs/bcrypt)** — password hashing
-- **[PostgreSQL](https://www.postgresql.org/)** — relational database
+- Passwords are hashed with **bcrypt** before storage and are never logged.
+- Session tokens are random **UUID v4** values, rotated on every login.
+- **Change the default `docker-compose.yml` credentials** before any non-local deployment.
+- Consider placing the server behind a firewall and exposing only port 80/443 through Apache.

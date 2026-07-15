@@ -17,8 +17,7 @@ services:
   server:
     build:
       context: .
-      args:
-        DATABASE_URL: postgresql://gracz:haslo@db:5432/tictactoe
+      target: server
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -27,6 +26,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - server
 
 volumes:
   pgdata:

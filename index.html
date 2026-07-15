@@ -44,8 +44,8 @@
 
     <div id="screen-auth" class="card">
         <h2>Zaloguj się</h2>
-        <input type="text" id="in-user" placeholder="Użytkownik">
-        <input type="password" id="in-pass" placeholder="Hasło">
+        <input type="text" id="in-user" placeholder="Użytkownik" aria-label="Nazwa użytkownika">
+        <input type="password" id="in-pass" placeholder="Hasło" aria-label="Hasło">
         <button onclick="auth('login')">Zaloguj</button>
         <button onclick="auth('register')" style="background: #7f8c8d;">Zarejestruj</button>
         <p id="auth-err" style="color: #e74c3c;"></p>
@@ -104,6 +104,14 @@
         async function auth(mode) {
             const name = document.getElementById('in-user').value;
             const pass = document.getElementById('in-pass').value;
+            const errEl = document.getElementById('auth-err');
+            errEl.innerText = '';
+
+            if (mode === 'register' && (name.trim().length < 8 || pass.length < 8)) {
+                errEl.innerText = 'Nazwa użytkownika i hasło muszą mieć min. 8 znaków.';
+                return;
+            }
+
             try {
                 const res = await fetch('/api/' + mode, {
                     method: 'POST',
@@ -116,7 +124,9 @@
                         myUsername = name;
                         showMenu();
                     } else { alert("Konto utworzone!"); }
-                } else { document.getElementById('auth-err').innerText = "Błąd autoryzacji"; }
+                } else if (mode === 'register') {
+                    errEl.innerText = 'Nazwa zajęta albo dane nie spełniają wymagań (min. 8 znaków).';
+                } else { errEl.innerText = "Błąd autoryzacji"; }
             } catch (e) { console.error(e); }
         }
 
@@ -136,8 +146,14 @@
             document.getElementById('screen-game').classList.add('hidden');
             document.getElementById('screen-menu').classList.remove('hidden');
             document.getElementById('player-name').innerText = myUsername;
+            resetSearchUI();
             loadTop10();
             if (!rankingInterval) rankingInterval = setInterval(loadTop10, 5000);
+        }
+
+        function resetSearchUI() {
+            document.getElementById('search-controls').classList.remove('hidden');
+            document.getElementById('loader-box').classList.add('hidden');
         }
 
         function startSearch() {
@@ -147,8 +163,15 @@
             ws = new WebSocket(`${protocol}//${window.location.host}/api/search`);
             ws.onopen = () => ws.send(JSON.stringify({ token: userToken }));
             ws.onmessage = (evt) => {
+                const data = JSON.parse(evt.data);
+                if (data.error) {
+                    ws.close();
+                    resetSearchUI();
+                    alert('Już szukasz gry w innym oknie/karcie.');
+                    return;
+                }
                 if (rankingInterval) { clearInterval(rankingInterval); rankingInterval = null; }
-                renderGame(JSON.parse(evt.data));
+                renderGame(data);
             };
         }
 

@@ -1,7 +1,30 @@
+//! # Game Logic
+//!
+//! Real-time Tic-Tac-Toe gameplay over persistent WebSocket connections.
+//!
+//! ## Matchmaking flow
+//!
+//! 1. A player connects to `/api/search` and sends their session token.
+//! 2. The token is validated; the player is pushed into a [`VecDeque`]-based
+//!    matchmaking queue shared across all Tokio tasks via `Arc<Mutex<…>>`.
+//! 3. When a second player connects, both are paired and a dedicated `game` task
+//!    begins, driving the match with [`tokio::select!`] so moves from either side
+//!    are handled concurrently without blocking.
+//! 4. After each valid move the updated [`Game`] state is serialised to JSON and
+//!    broadcast to both sockets.
+//! 5. On game-over or disconnect the winner/loser statistics are persisted to the
+//!    database and both connections are closed gracefully.
+//!
+//! ## Author
+//! Marcel Gruszecki
+//!
+//! ## License
+//! MIT — see `LICENSE` in the repository root.
+
 use std::cmp::PartialEq;
-use axum::{routing::{get, post}, http::StatusCode, Json, Router, Error};
+use axum::Error;
 use axum::extract::State;
-use axum::extract::ws::{Message, Utf8Bytes};
+use axum::extract::ws::Message;
 use axum::extract::ws::WebSocket;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::IntoResponse;
@@ -21,18 +44,16 @@ const WINNING_COMBINATIONS: [[usize; 3]; 8] = [
 pub struct Player {
     id: i32,
     name: String,
-    token: String,
     response: SerwerResponse,
     socket: WebSocket,
 }
 
 impl Player {
-    async fn new(socket: WebSocket, token: String, pool: Pool<Postgres>) -> Self {
-        let (id, name) = player_from_token(pool.clone(), &token).await;
+    async fn new(socket: WebSocket, token: &str, pool: Pool<Postgres>) -> Self {
+        let (id, name) = player_from_token(pool.clone(), token).await;
         Self {
             id,
             name,
-            token,
             socket,
             response: SerwerResponse::new(),
         }
@@ -151,31 +172,45 @@ async fn search_game(mut socket: WebSocket, appmod: AppMod) {
         return;
     }
 
-    let mut player = Player::new(socket, token, pool.clone()).await;
+    let mut player = Player::new(socket, &token, pool.clone()).await;
 
-    let mut rx_to_wait = None;
-
-    {
+    let outcome = {
         let mut queue = appmod.queue.lock().unwrap();
 
-        if let Some(tx) = queue.pop_front() {
-            let _ = tx.send(player);
-            return;
+        if queue.iter().any(|(id, _)| *id == player.id) {
+            QueueOutcome::AlreadySearching
+        } else if let Some((_, tx)) = queue.pop_front() {
+            QueueOutcome::Matched(tx)
         } else {
             let (tx, rx) = oneshot::channel::<Player>();
-            queue.push_back(tx);
-            rx_to_wait = Some(rx);
+            queue.push_back((player.id, tx));
+            QueueOutcome::Waiting(rx)
+        }
+    };
+
+    match outcome {
+        QueueOutcome::AlreadySearching => {
+            eprintln!("{} is already searching for a game", player.name);
+            let _ = send_json(&mut player.socket, &serde_json::json!({ "error": "ALREADY_SEARCHING" })).await;
+        }
+        QueueOutcome::Matched(tx) => {
+            let _ = tx.send(player);
+        }
+        QueueOutcome::Waiting(rx) => {
+            if let Ok(mut opponent) = rx.await {
+                player.response = SerwerResponse::first_response_player1();
+                opponent.response = SerwerResponse::first_response_player2();
+
+                game(player, opponent, pool.clone()).await;
+            }
         }
     }
+}
 
-    if let Some(rx) = rx_to_wait {
-        if let Ok(mut opponent) = rx.await {
-            player.response = SerwerResponse::first_response_player1();
-            opponent.response = SerwerResponse::first_response_player2();
-
-            game(player, opponent, pool.clone()).await;
-        }
-    }
+enum QueueOutcome {
+    AlreadySearching,
+    Matched(oneshot::Sender<Player>),
+    Waiting(oneshot::Receiver<Player>),
 }
 
 async fn game(mut player1: Player, mut player2: Player, pool: Pool<Postgres>) {
@@ -184,13 +219,15 @@ async fn game(mut player1: Player, mut player2: Player, pool: Pool<Postgres>) {
 
     match full_send(player1, player2, pool.clone()).await {
         Ok(_) => {}
-        Err(err) => { eprintln!("{} disconnected", player1.name); return }
+        Err(_) => { eprintln!("{} disconnected", player1.name); return }
     };
 
     match full_send(player2, player1, pool.clone()).await {
         Ok(_) => {}
-        Err(err) => { eprintln!("{} disconnected", player2.name); return }
+        Err(_) => { eprintln!("{} disconnected", player2.name); return }
     };
+
+    let mut disconnected = false;
 
     loop {
         tokio::select! {
@@ -200,9 +237,7 @@ async fn game(mut player1: Player, mut player2: Player, pool: Pool<Postgres>) {
                         if player1.response.status != Status::InGame { break }
                         if player2.response.status != Status::InGame { break }
                     }
-                    Err(err) => {
-                        break;
-                    }
+                    Err(_) => { disconnected = true; break; }
                 }
             }
 
@@ -212,11 +247,23 @@ async fn game(mut player1: Player, mut player2: Player, pool: Pool<Postgres>) {
                         if player1.response.status != Status::InGame { break }
                         if player2.response.status != Status::InGame { break }
                     }
-                    Err(err) => {
-                        break;
-                    }
+                    Err(_) => { disconnected = true; break; }
                 }
             }
+        }
+    }
+
+    if !disconnected {
+        match &player1.response.status {
+            Status::Player1Won => {
+                add_win_id(pool.clone(), player1.id).await;
+                add_lose_id(pool.clone(), player2.id).await;
+            }
+            Status::Player2Won => {
+                add_win_id(pool.clone(), player2.id).await;
+                add_lose_id(pool.clone(), player1.id).await;
+            }
+            _ => {}
         }
     }
 }
@@ -232,29 +279,29 @@ async fn player_handler(sender: &mut Player, waiting_player: &mut Player, result
 
                             match full_send(sender, waiting_player, pool.clone()).await {
                                 Ok(_) => {}
-                                Err(err) => {
+                                Err(e) => {
                                     eprintln!("{} disconnected", sender.name);
-                                    return Err(err)
+                                    return Err(e)
                                 }
                             };
 
                             match full_send(waiting_player, sender, pool.clone()).await {
                                 Ok(_) => {}
-                                Err(err) => {
+                                Err(e) => {
                                     eprintln!("{} disconnected", waiting_player.name);
-                                    return Err(err)
+                                    return Err(e)
                                 }
                             };
 
                             Ok(())
                         }
-                        Err(err) => {
+                        Err(_) => {
                             sender.response.response = MoveResponse::Refused;
                             match full_send(sender, waiting_player, pool.clone()).await {
                                 Ok(_) => {}
-                                Err(err) => {
+                                Err(e) => {
                                     eprintln!("{} sent an wrong JSON format", waiting_player.name);
-                                    return Err(err)
+                                    return Err(e)
                                 }
                             };
                             Ok(())
@@ -293,7 +340,7 @@ fn make_a_move(from_user: Move, current_player: &mut SerwerResponse, waiting_pla
     let board = &mut current_player.game.board;
     let symbol = current_player.your_symbol;
 
-    if from_user.field > 8 || from_user.field < 0 || board[from_user.field] != BoardOptions::Null  {
+    if from_user.field > 8 || board[from_user.field] != BoardOptions::Null {
         current_player.response = MoveResponse::Refused;
         return
     }
